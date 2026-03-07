@@ -33,6 +33,33 @@ class UserStoreCrateDb(
 
     private var connection: java.sql.Connection? = null
 
+    @Synchronized
+    private fun getOrReconnect(): java.sql.Connection? {
+        try {
+            val conn = connection
+            if (conn != null && !conn.isClosed && conn.isValid(3)) {
+                return conn
+            }
+        } catch (e: Exception) {
+            logger.fine("Connection validation failed: ${e.message}")
+        }
+        // Reconnect
+        try {
+            connection?.close()
+        } catch (_: Exception) {}
+        return try {
+            val conn = java.sql.DriverManager.getConnection(url, username, password)
+            conn.autoCommit = false
+            connection = conn
+            logger.info("CrateDB user store connection re-established")
+            conn
+        } catch (e: Exception) {
+            logger.warning("CrateDB user store reconnection failed: ${e.message}")
+            connection = null
+            null
+        }
+    }
+
     private fun createTablesSync(connection: java.sql.Connection): Boolean {
         return try {
             val createTableSQL = listOf("""
@@ -123,7 +150,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "INSERT INTO $usersTableName (username, password_hash, enabled, can_subscribe, can_publish, is_admin) VALUES (?, ?, ?, ?, ?, ?)"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         stmt.setString(1, user.username)
                         stmt.setString(2, user.passwordHash)
@@ -158,7 +185,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "UPDATE $usersTableName SET password_hash = ?, enabled = ?, can_subscribe = ?, can_publish = ?, is_admin = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         stmt.setString(1, user.passwordHash)
                         stmt.setBoolean(2, user.enabled)
@@ -193,7 +220,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "DELETE FROM $usersTableName WHERE username = ?"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         stmt.setString(1, username)
                         val result = stmt.executeUpdate() > 0
@@ -223,7 +250,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "SELECT username, password_hash, enabled, can_subscribe, can_publish, is_admin, created_at, updated_at FROM $usersTableName WHERE username = ?"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         stmt.setString(1, username)
                         val rs = stmt.executeQuery()
@@ -263,7 +290,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "SELECT username, password_hash, enabled, can_subscribe, can_publish, is_admin, created_at, updated_at FROM $usersTableName ORDER BY username"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         val rs = stmt.executeQuery()
                         val users = mutableListOf<User>()
@@ -324,7 +351,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "INSERT INTO $usersAclTableName (id, username, topic_pattern, can_subscribe, can_publish, priority) VALUES (?, ?, ?, ?, ?, ?)"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         // Generate UUID for CrateDB
                         val id = rule.id.ifEmpty { UUID.randomUUID().toString() }
@@ -361,7 +388,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "UPDATE $usersAclTableName SET username = ?, topic_pattern = ?, can_subscribe = ?, can_publish = ?, priority = ? WHERE id = ?"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         stmt.setString(1, rule.username)
                         stmt.setString(2, rule.topicPattern)
@@ -396,7 +423,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "DELETE FROM $usersAclTableName WHERE id = ?"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         stmt.setString(1, id)
                         val result = stmt.executeUpdate() > 0
@@ -426,7 +453,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "SELECT id, username, topic_pattern, can_subscribe, can_publish, priority, created_at FROM $usersAclTableName WHERE id = ?"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         stmt.setString(1, id)
                         val rs = stmt.executeQuery()
@@ -465,7 +492,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "SELECT id, username, topic_pattern, can_subscribe, can_publish, priority, created_at FROM $usersAclTableName WHERE username = ? ORDER BY priority DESC"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         stmt.setString(1, username)
                         val rs = stmt.executeQuery()
@@ -506,7 +533,7 @@ class UserStoreCrateDb(
         vertx.executeBlocking(Callable {
             val sql = "SELECT id, username, topic_pattern, can_subscribe, can_publish, priority, created_at FROM $usersAclTableName ORDER BY priority DESC"
             try {
-                connection?.let { connection ->
+                getOrReconnect()?.let { connection ->
                     connection.prepareStatement(sql).use { stmt ->
                         val rs = stmt.executeQuery()
                         val rules = mutableListOf<AclRule>()
