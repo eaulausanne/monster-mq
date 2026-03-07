@@ -1,0 +1,17 @@
+# Stage 1: Build with Maven
+FROM maven:3.9-eclipse-temurin-21 AS builder
+WORKDIR /build
+COPY broker/pom.xml ./
+RUN mvn dependency:go-offline -q
+COPY broker/src ./src
+RUN mvn package -q -DskipTests
+
+# Stage 2: Runtime
+FROM ghcr.io/graalvm/jdk-community:25
+WORKDIR /app
+COPY docker/entrypoint.sh docker/server-keystore.jks ./
+COPY --from=builder /build/target/broker-1.0-SNAPSHOT.jar ./
+COPY --from=builder /build/target/dependencies ./
+RUN chmod +x /app/entrypoint.sh
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD []
