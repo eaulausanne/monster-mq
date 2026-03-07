@@ -13,7 +13,7 @@ import at.rocworks.data.MqttSubscription
 import at.rocworks.data.MqttSubscriptionCodec
 import at.rocworks.extensions.graphql.GraphQLServer
 import at.rocworks.extensions.McpServer
-import at.rocworks.extensions.GrafanaServer
+import at.rocworks.extensions.PrometheusServer
 import at.rocworks.extensions.I3xServer
 import at.rocworks.extensions.ApiService
 import at.rocworks.handlers.*
@@ -755,17 +755,10 @@ MORE INFO:
                     null
                 }
 
-                // Grafana JSON Data Source API Server
-                val grafanaConfig = configJson.getJsonObject("Grafana", JsonObject())
-                val grafanaEnabled = grafanaConfig.getBoolean("Enabled", false)
-                val grafanaPort = grafanaConfig.getInteger("Port", 3001)
-                val grafanaDefaultArchiveGroup = grafanaConfig.getString("DefaultArchiveGroup", "Default")
-                val grafanaServer = if (grafanaEnabled) {
-                    GrafanaServer("0.0.0.0", grafanaPort, archiveHandler, userManager, grafanaDefaultArchiveGroup)
-                } else {
-                    logger.fine("Grafana API server is disabled in configuration")
-                    null
-                }
+                // Prometheus-compatible metrics server (instantiated after metricsStore below)
+                val prometheusConfig = configJson.getJsonObject("Prometheus", JsonObject())
+                val prometheusEnabled = prometheusConfig.getBoolean("Enabled", false)
+                val prometheusPort = prometheusConfig.getInteger("Port", 3001)
 
                 // CESMII I3X API Server
                 val i3xConfig = configJson.getJsonObject("I3x", JsonObject())
@@ -806,6 +799,15 @@ MORE INFO:
                 } else {
                     logger.fine("Metrics collection is disabled in configuration")
                     null to null
+                }
+
+                // Prometheus Server (needs metricsStore for historical broker metrics)
+                val prometheusRawQueryLimit = prometheusConfig.getInteger("RawQueryLimit", 10000)
+                val prometheusServer = if (prometheusEnabled) {
+                    PrometheusServer("0.0.0.0", prometheusPort, archiveHandler, userManager, metricsStore, prometheusRawQueryLimit)
+                } else {
+                    logger.fine("Prometheus server is disabled in configuration")
+                    null
                 }
 
                 // GenAI Provider
@@ -867,7 +869,7 @@ MORE INFO:
                     if (useWsSsl>0) MqttServer(useWsSsl, true, true, maxMessageSize, tcpNoDelay, receiveBufferSize, sendBufferSize, sessionHandler, userManager, keyStorePath, keyStorePassword, keyStoreType) else null,
                     if (useNats>0) NatsServer(useNats, sessionHandler, userManager) else null,
                     mcpServer,
-                    grafanaServer,
+                    prometheusServer,
                     i3xServer
                 )
 

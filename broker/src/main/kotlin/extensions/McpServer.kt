@@ -1,5 +1,6 @@
 package at.rocworks.extensions
 
+import at.rocworks.Const
 import at.rocworks.Utils
 import at.rocworks.auth.UserManager
 import at.rocworks.extensions.graphql.JwtService
@@ -25,7 +26,7 @@ class McpServer(
     private val archiveHandler: ArchiveHandler,
     private val userManager: UserManager
 ) : AbstractVerticle() {
-    private val logger = Utils.getLogger(this::class.java)
+    private val logger = Utils.getLogger(this::class.java).also { it.level = Const.DEBUG_LEVEL }
 
     class Connection(
         val connectionId: String,
@@ -201,6 +202,10 @@ class McpServer(
         val token = JwtService.extractTokenFromHeader(authHeader)
 
         if (token == null) {
+            if (userManager.isAnonymousEnabled()) {
+                logger.fine("MCP request allowed for Anonymous user")
+                return true
+            }
             logger.warning("MCP request rejected: No Authorization header")
             ctx.response()
                 .setStatusCode(401)
