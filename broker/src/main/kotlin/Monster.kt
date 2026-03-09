@@ -723,6 +723,9 @@ MORE INFO:
                         store?.initialize()?.onComplete { result ->
                             if (result.failed()) {
                                 logger.warning("Failed to initialize device config store: ${result.cause()?.message}")
+                            } else {
+                                // Start Topic Schema Policy Cache after store is ready
+                                at.rocworks.schema.TopicSchemaPolicyCache(vertx, store).start()
                             }
                         }
                         store
