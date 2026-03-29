@@ -34,10 +34,18 @@ import at.rocworks.graphql.JDBCLoggerQueries
 import at.rocworks.graphql.JDBCLoggerMutations
 import at.rocworks.graphql.NatsClientConfigQueries
 import at.rocworks.graphql.NatsClientConfigMutations
+import at.rocworks.graphql.TelegramClientConfigQueries
+import at.rocworks.graphql.TelegramClientConfigMutations
 import at.rocworks.graphql.SparkplugBDecoderQueries
 import at.rocworks.graphql.SparkplugBDecoderMutations
 import at.rocworks.graphql.FlowQueries
 import at.rocworks.graphql.FlowMutations
+import at.rocworks.graphql.AgentQueries
+import at.rocworks.graphql.AgentMutations
+import at.rocworks.graphql.McpServerQueries
+import at.rocworks.graphql.McpServerMutations
+import at.rocworks.graphql.GenAiProviderQueries
+import at.rocworks.graphql.GenAiProviderMutations
 import at.rocworks.graphql.TopicSchemaQueries
 import at.rocworks.graphql.TopicSchemaMutations
 import at.rocworks.schema.TopicSchemaPolicyCache
@@ -55,11 +63,11 @@ import io.vertx.core.http.HttpServerOptions
 import io.vertx.core.json.JsonObject
 import io.vertx.ext.web.Router
 import io.vertx.ext.web.handler.BodyHandler
-import io.vertx.ext.web.handler.StaticHandler
-import io.vertx.ext.web.handler.FileSystemAccess
 import io.vertx.ext.web.handler.graphql.GraphQLHandler
 import io.vertx.ext.web.handler.graphql.GraphQLHandlerOptions
 import io.vertx.ext.web.handler.graphql.ws.GraphQLWSHandler
+import io.vertx.ext.web.handler.StaticHandler
+import io.vertx.ext.web.handler.FileSystemAccess
 import java.util.logging.Logger
 
 class GraphQLServer(
@@ -74,9 +82,9 @@ class GraphQLServer(
     private val sessionHandler: SessionHandler,
     private val metricsStore: IMetricsStore?,
     private val archiveHandler: ArchiveHandler?,
-    private val dashboardPath: String? = null,
     private val sharedDeviceConfigStore: IDeviceConfigStore? = null,
-    private val genAiProvider: at.rocworks.genai.IGenAiProvider? = null
+    private val genAiProvider: at.rocworks.genai.IGenAiProvider? = null,
+    private val dashboardPath: String? = null
 ) {
     companion object {
         private val logger: Logger = Utils.getLogger(GraphQLServer::class.java)
@@ -196,22 +204,35 @@ class GraphQLServer(
                 .end(JsonObject().put("status", "healthy").encode())
         }
 
-        // Serve dashboard static files
-        router.route("/*").handler(
-            if (dashboardPath != null) {
-                // Development mode: serve from filesystem
+        // Dashboard static file serving
+        if (dashboardPath != null) {
+            val staticHandler = if (dashboardPath.isNotEmpty()) {
+                // Dev mode: serve from filesystem path
                 logger.info("Dashboard serving from filesystem: $dashboardPath")
                 StaticHandler.create(FileSystemAccess.ROOT, dashboardPath)
-                    .setIndexPage("pages/login.html")
-                    .setCachingEnabled(false)  // Disable caching for development
+                    .setIndexPage("index.html")
+                    .setCachingEnabled(false)
             } else {
-                // Production mode: serve from classpath resources
-                logger.fine("Dashboard serving from classpath resources")
+                // Production: serve from classpath resources
+                logger.info("Dashboard serving from classpath resources")
                 StaticHandler.create("dashboard")
-                    .setIndexPage("pages/login.html")
-                    .setCachingEnabled(false)  // Disable caching for development
+                    .setIndexPage("index.html")
+                    .setCachingEnabled(true)
             }
-        )
+            router.route("/*").handler(staticHandler)
+            // Suppress broken pipe errors from browsers closing connections early
+            router.route("/*").failureHandler { ctx ->
+                val cause = ctx.failure()
+                val msg = cause?.message ?: ""
+                val isAbortedConnection = cause is java.io.IOException &&
+                    (msg.contains("Broken pipe") || msg.contains("connection was aborted") || msg.contains("Connection reset"))
+                if (isAbortedConnection) {
+                    logger.fine("Client disconnected early: $msg")
+                } else {
+                    ctx.next()
+                }
+            }
+        }
 
         // Create HTTP server
         val options = HttpServerOptions()
@@ -246,7 +267,10 @@ class GraphQLServer(
             "schema-flows.graphqls",       // Flow Engine types and operations
             "schema-sparkplugb-decoder.graphqls", // SparkplugB Decoder device types and operations
             "schema-genai.graphqls",       // GenAI integration
-            "schema-topic-schema.graphqls" // Topic Schema Governance
+            "schema-topic-schema.graphqls", // Topic Schema Governance
+            "schema-agents.graphqls",      // AI Agents
+            "schema-mcp-servers.graphqls",  // MCP Servers
+            "schema-genai-providers.graphqls" // GenAI Providers
         )
 
         return schemaFiles.joinToString("\n") { filename ->
@@ -364,6 +388,10 @@ class GraphQLServer(
         val natsClientQueries = deviceStore?.let { NatsClientConfigQueries(vertx, it) }
         val natsClientMutations = deviceStore?.let { NatsClientConfigMutations(vertx, it) }
 
+        // Initialize Telegram Client resolvers
+        val telegramClientQueries = deviceStore?.let { TelegramClientConfigQueries(vertx, it) }
+        val telegramClientMutations = deviceStore?.let { TelegramClientConfigMutations(vertx, it) }
+
         // Initialize Topic Schema Governance resolvers
         // Reuse the singleton cache initialized in Monster.kt, or create if not yet available
         val topicSchemaPolicyCache = TopicSchemaPolicyCache.getInstance()
@@ -374,6 +402,18 @@ class GraphQLServer(
         val topicSchemaMutations = if (deviceStore != null && topicSchemaPolicyCache != null) {
             TopicSchemaMutations(deviceStore, topicSchemaPolicyCache)
         } else null
+
+        // Initialize AI Agent resolvers
+        val agentQueries = deviceStore?.let { AgentQueries(vertx, it, config) }
+        val agentMutations = deviceStore?.let { AgentMutations(vertx, it) }
+
+        // Initialize MCP Server resolvers
+        val mcpServerQueries = deviceStore?.let { McpServerQueries(vertx, it) }
+        val mcpServerMutations = deviceStore?.let { McpServerMutations(vertx, it) }
+
+        // Initialize GenAI Provider resolvers
+        val genAiProviderQueries = deviceStore?.let { GenAiProviderQueries(vertx, it, config) }
+        val genAiProviderMutations = deviceStore?.let { GenAiProviderMutations(vertx, it) }
 
         // Initialize GenAI resolver (with archiveHandler for topic analysis)
         val genAiResolver = genAiProvider?.let { GenAiResolver(vertx, it, archiveHandler) }
@@ -456,6 +496,12 @@ class GraphQLServer(
                             dataFetcher("natsClients", resolver.natsClients())
                         }
                     }
+                    // Telegram Client queries
+                    .apply {
+                        telegramClientQueries?.let { resolver ->
+                            dataFetcher("telegramClients", resolver.telegramClients())
+                        }
+                    }
                     // WinCC OA Client queries
                     .apply {
                         winCCOaClientQueries?.let { resolver ->
@@ -498,6 +544,28 @@ class GraphQLServer(
                             dataFetcher("flowClasses", resolver.flowClasses())
                             dataFetcher("flowInstances", resolver.flowInstances())
                             dataFetcher("flowNodeTypes", resolver.flowNodeTypes())
+                        }
+                    }
+                    // AI Agent queries
+                    .apply {
+                        agentQueries?.let { resolver ->
+                            dataFetcher("agents", resolver.agents())
+                            dataFetcher("agent", resolver.agent())
+                            dataFetcher("configuredProviders", resolver.configuredProviders())
+                        }
+                    }
+                    // MCP Server queries
+                    .apply {
+                        mcpServerQueries?.let { resolver ->
+                            dataFetcher("mcpServers", resolver.mcpServers())
+                            dataFetcher("mcpServer", resolver.mcpServer())
+                        }
+                    }
+                    // GenAI Provider queries
+                    .apply {
+                        genAiProviderQueries?.let { resolver ->
+                            dataFetcher("genAiProviders", resolver.genAiProviders())
+                            dataFetcher("genAiProvider", resolver.genAiProvider())
                         }
                     }
                     // GenAI queries
@@ -611,6 +679,16 @@ class GraphQLServer(
                             }
                         }
                     }
+                    // Telegram Client mutations - grouped under telegramClient
+                    .apply {
+                        telegramClientMutations?.let { _ ->
+                            dataFetcher("telegramClient") { env ->
+                                val result = authContext.validateFieldAccess(env)
+                                if (!result.allowed) throw GraphQLException(result.errorMessage ?: "Unauthorized")
+                                emptyMap<String, Any>()
+                            }
+                        }
+                    }
                     // WinCC OA Client mutations - grouped under winCCOaDevice
                     .apply {
                         winCCOaClientMutations?.let { _ ->
@@ -701,6 +779,36 @@ class GraphQLServer(
                             }
                         }
                     }
+                    // AI Agent mutations - grouped under agent
+                    .apply {
+                        agentMutations?.let { _ ->
+                            dataFetcher("agent") { env ->
+                                val result = authContext.validateFieldAccess(env)
+                                if (!result.allowed) throw GraphQLException(result.errorMessage ?: "Unauthorized")
+                                emptyMap<String, Any>()
+                            }
+                        }
+                    }
+                    // MCP Server mutations - grouped under mcpServer
+                    .apply {
+                        mcpServerMutations?.let { _ ->
+                            dataFetcher("mcpServer") { env ->
+                                val result = authContext.validateFieldAccess(env)
+                                if (!result.allowed) throw GraphQLException(result.errorMessage ?: "Unauthorized")
+                                emptyMap<String, Any>()
+                            }
+                        }
+                    }
+                    // GenAI Provider mutations - grouped under genAiProvider
+                    .apply {
+                        genAiProviderMutations?.let { _ ->
+                            dataFetcher("genAiProvider") { env ->
+                                val result = authContext.validateFieldAccess(env)
+                                if (!result.allowed) throw GraphQLException(result.errorMessage ?: "Unauthorized")
+                                emptyMap<String, Any>()
+                            }
+                        }
+                    }
             }
             // Register MQTT Client Mutations type
             .type("MqttClientMutations") { builder ->
@@ -747,6 +855,20 @@ class GraphQLServer(
                         dataFetcher("addAddress", resolver.addNatsClientAddress())
                         dataFetcher("updateAddress", resolver.updateNatsClientAddress())
                         dataFetcher("deleteAddress", resolver.deleteNatsClientAddress())
+                    }
+                }
+            }
+            // Register Telegram Client Mutations type
+            .type("TelegramClientMutations") { builder ->
+                builder.apply {
+                    telegramClientMutations?.let { resolver ->
+                        dataFetcher("create", resolver.createTelegramClient())
+                        dataFetcher("update", resolver.updateTelegramClient())
+                        dataFetcher("delete", resolver.deleteTelegramClient())
+                        dataFetcher("start", resolver.startTelegramClient())
+                        dataFetcher("stop", resolver.stopTelegramClient())
+                        dataFetcher("toggle", resolver.toggleTelegramClient())
+                        dataFetcher("reassign", resolver.reassignTelegramClient())
                     }
                 }
             }
@@ -948,6 +1070,12 @@ class GraphQLServer(
             // Register field resolvers for types
             .type("Broker") { builder ->
                 builder
+                    .dataFetcher("enabledFeatures") { env ->
+                        val broker = env.getSource<at.rocworks.extensions.graphql.Broker?>()
+                        java.util.concurrent.CompletableFuture.completedFuture(
+                            broker?.enabledFeatures ?: emptyList<String>()
+                        )
+                    }
                     .dataFetcher("userManagementEnabled") { env ->
                         java.util.concurrent.CompletableFuture.completedFuture(userManager.isUserManagementEnabled())
                     }
@@ -1033,6 +1161,13 @@ class GraphQLServer(
                     }
                 }
             }
+            .type("TelegramClient") { builder ->
+                builder.apply {
+                    telegramClientQueries?.let { resolver ->
+                        dataFetcher("metrics", resolver.telegramClientMetrics())
+                    }
+                }
+            }
             .type("SparkplugBDecoder") { builder ->
                 builder.apply {
                     sparkplugBDecoderQueries?.let { queries ->
@@ -1093,6 +1228,38 @@ class GraphQLServer(
                 builder
                     .dataFetcher("metrics", metricsResolver.opcUaDeviceMetricsField())
                     .dataFetcher("metricsHistory", metricsResolver.opcUaDeviceMetricsHistoryField())
+            }
+            // Register Agent Mutations type
+            .type("AgentMutations") { builder ->
+                builder.apply {
+                    agentMutations?.let { resolver ->
+                        dataFetcher("create", resolver.createAgent())
+                        dataFetcher("update", resolver.updateAgent())
+                        dataFetcher("delete", resolver.deleteAgent())
+                        dataFetcher("start", resolver.startAgent())
+                        dataFetcher("stop", resolver.stopAgent())
+                    }
+                }
+            }
+            // Register MCP Server Mutations type
+            .type("McpServerMutations") { builder ->
+                builder.apply {
+                    mcpServerMutations?.let { resolver ->
+                        dataFetcher("create", resolver.createMcpServer())
+                        dataFetcher("update", resolver.updateMcpServer())
+                        dataFetcher("delete", resolver.deleteMcpServer())
+                    }
+                }
+            }
+            // Register GenAI Provider Mutations type
+            .type("GenAiProviderMutations") { builder ->
+                builder.apply {
+                    genAiProviderMutations?.let { resolver ->
+                        dataFetcher("create", resolver.createProvider())
+                        dataFetcher("update", resolver.updateProvider())
+                        dataFetcher("delete", resolver.deleteProvider())
+                    }
+                }
             }
             .build()
     }

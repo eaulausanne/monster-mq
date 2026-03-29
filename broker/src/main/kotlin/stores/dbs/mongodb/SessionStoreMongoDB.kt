@@ -7,7 +7,6 @@ import at.rocworks.data.MqttSubscription
 import at.rocworks.stores.ISessionStoreSync
 import at.rocworks.stores.SessionStoreType
 import com.mongodb.client.MongoClient
-import com.mongodb.client.MongoClients
 import com.mongodb.client.MongoCollection
 import com.mongodb.client.MongoDatabase
 import com.mongodb.client.model.Filters.*
@@ -18,6 +17,7 @@ import io.vertx.core.Promise
 import io.vertx.core.json.JsonObject
 import org.bson.Document
 import org.bson.types.Binary
+import java.util.concurrent.Callable
 
 class SessionStoreMongoDB(
     private val connectionString: String,
@@ -40,7 +40,7 @@ class SessionStoreMongoDB(
 
     override fun start(startPromise: Promise<Void>) {
         try {
-            mongoClient = MongoClients.create(connectionString)
+            mongoClient = MongoClientPool.getClient(connectionString)
             database = mongoClient.getDatabase(databaseName)
 
             // Initialize collections
@@ -49,13 +49,21 @@ class SessionStoreMongoDB(
             queuedMessagesCollection = database.getCollection("queuedmessages")
             queuedMessagesClientsCollection = database.getCollection("queuedmessagesclients")
 
-            // Create indexes for faster queries
-            sessionsCollection.createIndex(Document("client_id", 1))
-            subscriptionsCollection.createIndex(Document("client_id", 1).append("topic", 1))
-            queuedMessagesCollection.createIndex(Document("client_id", 1))
-            queuedMessagesCollection.createIndex(Document("message_uuid", 1))  // For $lookup joins
-            queuedMessagesClientsCollection.createIndex(Document("client_id", 1))
-            queuedMessagesClientsCollection.createIndex(Document("client_id", 1).append("status", 1))
+            // Create indexes in background to avoid blocking the event loop
+            vertx.executeBlocking(Callable {
+                try {
+                    sessionsCollection.createIndex(Document("client_id", 1))
+                    subscriptionsCollection.createIndex(Document("client_id", 1).append("topic", 1))
+                    queuedMessagesCollection.createIndex(Document("client_id", 1))
+                    queuedMessagesCollection.createIndex(Document("message_uuid", 1))  // For $lookup joins
+                    queuedMessagesClientsCollection.createIndex(Document("client_id", 1))
+                    queuedMessagesClientsCollection.createIndex(Document("client_id", 1).append("status", 1))
+                    logger.info("MongoDB session store indexes created successfully")
+                } catch (e: Exception) {
+                    logger.warning("Failed to create indexes: ${e.message}")
+                }
+                null
+            })
 
             logger.fine("MongoDB connection established successfully.")
             startPromise.complete()
@@ -667,8 +675,8 @@ class SessionStoreMongoDB(
     }
 
     override fun stop() {
-        mongoClient.close()
-        logger.info("MongoDB connection closed.")
+        MongoClientPool.releaseClient(connectionString)
+        logger.info("MongoDB connection released.")
     }
 
     override fun countQueuedMessages(): Long {

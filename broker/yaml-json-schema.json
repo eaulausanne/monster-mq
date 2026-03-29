@@ -351,6 +351,22 @@
         }
       }
     },
+    "Dashboard": {
+      "type": "object",
+      "description": "Web dashboard configuration (served from the GraphQL HTTP port)",
+      "properties": {
+        "Enabled": {
+          "type": "boolean",
+          "description": "Enable serving the web dashboard",
+          "default": true
+        },
+        "Path": {
+          "type": "string",
+          "description": "Filesystem path to dashboard files (for development). Leave empty to serve from classpath.",
+          "default": ""
+        }
+      }
+    },
     "GraphQL": {
       "type": "object",
       "description": "GraphQL server configuration",
@@ -381,48 +397,103 @@
     },
     "GenAI": {
       "type": "object",
-      "description": "Generative AI integration configuration for JavaScript coding assistance",
+      "description": "Generative AI configuration for assistant (script editor, topic analysis) and agent API keys",
       "properties": {
         "Enabled": {
           "type": "boolean",
-          "description": "Enable GenAI integration for AI-supported JavaScript coding",
+          "description": "Enable GenAI integration for AI-supported features",
           "default": false
+        },
+        "Assistant": {
+          "type": "object",
+          "description": "Configuration for the internal AI assistant (script editor, topic analysis). Uses LangChain4j.",
+          "properties": {
+            "Provider": {
+              "type": "string",
+              "description": "AI provider for the assistant",
+              "enum": ["gemini", "claude", "openai", "ollama"],
+              "default": "gemini"
+            },
+            "Model": {
+              "type": "string",
+              "description": "Model name (e.g., 'gemini-2.5-flash', 'claude-sonnet-4-20250514', 'gpt-4o', 'llama3')"
+            },
+            "Temperature": {
+              "type": "number",
+              "description": "Sampling temperature (0.0 to 2.0, higher = more creative)",
+              "default": 0.7,
+              "minimum": 0.0,
+              "maximum": 2.0
+            },
+            "DocsPath": {
+              "type": "string",
+              "description": "Path to documentation directory containing markdown files for context",
+              "default": "docs"
+            }
+          }
         },
         "Provider": {
           "type": "string",
-          "description": "AI provider to use",
-          "enum": ["gemini", "claude", "openai"],
+          "description": "(Deprecated: use Assistant.Provider) AI provider to use",
+          "enum": ["gemini", "claude", "openai", "ollama"],
           "default": "gemini"
-        },
-        "ApiKey": {
-          "type": "string",
-          "description": "API key for the selected provider (supports environment variable substitution like ${GENAI_API_KEY})"
         },
         "Model": {
           "type": "string",
-          "description": "Optional model name to use (provider-specific, e.g., 'gemini-pro', 'claude-3-opus', 'gpt-4')"
+          "description": "(Deprecated: use Assistant.Model) Model name to use"
         },
         "MaxTokens": {
           "type": "integer",
-          "description": "Maximum number of tokens in the response",
+          "description": "(Deprecated) Maximum number of tokens in the response",
           "default": 2048,
           "minimum": 1,
           "maximum": 100000
         },
         "Temperature": {
           "type": "number",
-          "description": "Sampling temperature for response generation (0.0 to 2.0, higher = more creative)",
+          "description": "(Deprecated: use Assistant.Temperature) Sampling temperature",
           "default": 0.7,
           "minimum": 0.0,
           "maximum": 2.0
         },
         "DocsPath": {
           "type": "string",
-          "description": "Path to documentation directory containing markdown files for context",
+          "description": "(Deprecated: use Assistant.DocsPath) Path to documentation directory",
           "default": "docs"
+        },
+        "Providers": {
+          "type": "object",
+          "description": "Per-provider API keys (shared by Assistant and Agents)",
+          "properties": {
+            "Gemini": {
+              "type": "object",
+              "properties": {
+                "ApiKey": { "type": "string", "description": "Gemini API key (supports ${ENV_VAR} syntax)" }
+              }
+            },
+            "Claude": {
+              "type": "object",
+              "properties": {
+                "ApiKey": { "type": "string", "description": "Anthropic API key (supports ${ENV_VAR} syntax)" }
+              }
+            },
+            "OpenAI": {
+              "type": "object",
+              "properties": {
+                "ApiKey": { "type": "string", "description": "OpenAI API key (supports ${ENV_VAR} syntax)" },
+                "Endpoint": { "type": "string", "description": "Custom OpenAI-compatible endpoint URL (e.g., http://localhost:8080/v1)" }
+              }
+            },
+            "Ollama": {
+              "type": "object",
+              "properties": {
+                "BaseUrl": { "type": "string", "description": "Ollama base URL (e.g., http://localhost:11434)", "default": "http://localhost:11434" },
+                "TimeoutSeconds": { "type": "integer", "description": "HTTP request timeout in seconds for Ollama requests (default: no timeout)" }
+              }
+            }
+          }
         }
-      },
-      "required": ["ApiKey"]
+      }
     },
     "ArchiveGroups": {
       "type": "array",
@@ -442,6 +513,27 @@
         },
         "required": ["Name","TopicFilter","LastValType","ArchiveType"]
       }
+    },
+    "Features": {
+      "type": "object",
+      "description": "Enable or disable optional broker features. All features are enabled by default; set a feature to false to disable it.",
+      "properties": {
+        "OpcUa": { "type": "boolean", "default": true, "description": "OPC UA client device bridge" },
+        "OpcUaServer": { "type": "boolean", "default": true, "description": "OPC UA server" },
+        "MqttClient": { "type": "boolean", "default": true, "description": "MQTT client bridge" },
+        "Kafka": { "type": "boolean", "default": true, "description": "Kafka client bridge" },
+        "Nats": { "type": "boolean", "default": true, "description": "NATS client bridge" },
+        "Telegram": { "type": "boolean", "default": true, "description": "Telegram client bridge" },
+        "WinCCOa": { "type": "boolean", "default": true, "description": "WinCC OA client bridge" },
+        "WinCCUa": { "type": "boolean", "default": true, "description": "WinCC Unified client bridge" },
+        "Plc4x": { "type": "boolean", "default": true, "description": "PLC4X industrial protocol bridge" },
+        "Neo4j": { "type": "boolean", "default": true, "description": "Neo4j graph database bridge" },
+        "JdbcLogger": { "type": "boolean", "default": true, "description": "JDBC logger device" },
+        "SparkplugB": { "type": "boolean", "default": true, "description": "SparkplugB decoder" },
+        "FlowEngine": { "type": "boolean", "default": true, "description": "Flow engine for automation workflows" },
+        "Agents": { "type": "boolean", "default": true, "description": "AI agent extension" }
+      },
+      "additionalProperties": false
     }
   },
   "required": [

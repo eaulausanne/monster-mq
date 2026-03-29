@@ -6,7 +6,6 @@ import at.rocworks.stores.DeviceConfigException
 import at.rocworks.stores.IDeviceConfigStore
 import at.rocworks.stores.ImportDeviceConfigResult
 import com.mongodb.client.MongoClient
-import com.mongodb.client.MongoClients
 import com.mongodb.client.MongoCollection
 import com.mongodb.client.MongoDatabase
 import com.mongodb.client.model.Filters.*
@@ -48,7 +47,7 @@ class DeviceConfigStoreMongoDB(
         val promise = Promise.promise<Void>()
 
         try {
-            mongoClient = MongoClients.create(connectionString)
+            mongoClient = MongoClientPool.getClient(connectionString)
             database = mongoClient.getDatabase(databaseName)
 
             // Initialize collection
@@ -61,7 +60,6 @@ class DeviceConfigStoreMongoDB(
             deviceConfigsCollection.createIndex(Document("namespace", 1))
             deviceConfigsCollection.createIndex(Document("type", 1))
 
-            logger.info("DeviceConfigStoreMongoDB initialized successfully")
             promise.complete()
         } catch (e: Exception) {
             logger.severe("Failed to initialize DeviceConfigStoreMongoDB: ${e.message}")
@@ -302,10 +300,10 @@ class DeviceConfigStoreMongoDB(
         val promise = Promise.promise<Void>()
 
         try {
-            mongoClient.close()
+            MongoClientPool.releaseClient(connectionString)
             promise.complete()
         } catch (e: Exception) {
-            logger.warning("Error closing MongoDB connection: ${e.message}")
+            logger.warning("Error releasing MongoDB connection: ${e.message}")
             promise.fail(e)
         }
 
@@ -351,14 +349,14 @@ class DeviceConfigStoreMongoDB(
             vertx!!.executeBlocking(Callable {
                 try {
                     logger.info("Attempting to reconnect to MongoDB...")
-                    // Close old client
+                    // Release old client reference
                     try {
-                        mongoClient.close()
+                        MongoClientPool.releaseClient(connectionString)
                     } catch (e: Exception) {
-                        logger.finer("Error closing old MongoDB connection: ${e.message}")
+                        logger.finer("Error releasing old MongoDB connection: ${e.message}")
                     }
-                    // Create new client
-                    mongoClient = MongoClients.create(connectionString)
+                    // Get shared client (may be the same instance)
+                    mongoClient = MongoClientPool.getClient(connectionString)
                     database = mongoClient.getDatabase(databaseName)
                     deviceConfigsCollection = database.getCollection(COLLECTION_NAME)
                     logger.info("Successfully reconnected to MongoDB")

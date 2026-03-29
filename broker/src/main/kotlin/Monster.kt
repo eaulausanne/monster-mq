@@ -15,7 +15,6 @@ import at.rocworks.extensions.graphql.GraphQLServer
 import at.rocworks.extensions.McpServer
 import at.rocworks.extensions.PrometheusServer
 import at.rocworks.extensions.I3xServer
-import at.rocworks.extensions.ApiService
 import at.rocworks.handlers.*
 import at.rocworks.handlers.MessageHandler
 import at.rocworks.handlers.ArchiveHandler
@@ -34,6 +33,7 @@ import io.vertx.config.ConfigRetrieverOptions
 import io.vertx.config.ConfigStoreOptions
 import io.vertx.core.*
 // VertxInternal removed in Vert.x 5 - using alternative approaches
+import io.vertx.core.json.JsonArray
 import io.vertx.core.json.JsonObject
 import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager
 import com.hazelcast.config.Config
@@ -58,7 +58,6 @@ import java.util.logging.Logger
 import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
-    // Print working directory and user.dir property
     Monster(args)
 }
 
@@ -69,8 +68,10 @@ class Monster(args: Array<String>) {
 
     private val configFile: String
     private var configJson: JsonObject = JsonObject()
-    private val archiveConfigFile: String?
-    private val dashboardPath: String?
+    private val archiveConfigsFile: String?
+    private val archiveConfigsMergeFile: String?
+    private val deviceConfigsFile: String?
+    private val deviceConfigsMergeFile: String?
     var archiveHandler: ArchiveHandler? = null
 
     // Cluster manager reference for Vert.x 5 compatibility
@@ -80,6 +81,7 @@ class Monster(args: Array<String>) {
     private var vertx: Vertx? = null
     private var sessionHandler: SessionHandler? = null
     private var messageBus: IMessageBus? = null
+    private var retainedStore: IMessageStore? = null
 
     private val postgresConfig = object {
         var url: String = ""
@@ -165,8 +167,54 @@ class Monster(args: Array<String>) {
             return getInstance().clusterManager
         }
 
+        // Feature flags — populated at startup from config, read by GraphQL resolvers
+        @Volatile
+        private var enabledFeatures: Set<String> = emptySet()
+
+        fun getEnabledFeatures(): Set<String> = enabledFeatures
+
+        fun isFeatureEnabled(feature: String): Boolean = enabledFeatures.contains(feature)
+
+        private fun publishEnabledFeatures(vertx: Vertx, features: Set<String>) {
+            enabledFeatures = features
+            val instance = getInstance()
+            if (instance.isClustered && instance.clusterManager is HazelcastClusterManager) {
+                val map = instance.clusterManager!!.hazelcastInstance
+                    .getMap<String, Set<String>>("monster.enabledFeatures")
+                val nodeId = getClusterNodeId(vertx)
+                map[nodeId] = features
+                // Check for mismatches with other nodes
+                map.entries.forEach { (otherId, otherFeatures) ->
+                    if (otherId != nodeId && otherFeatures != features) {
+                        logger.warning(
+                            "Feature flag mismatch detected! " +
+                            "This node ($nodeId): $features / " +
+                            "Node $otherId: $otherFeatures. " +
+                            "All cluster nodes must have identical Features config."
+                        )
+                    }
+                }
+            }
+        }
+
+        fun getEnabledFeaturesForNode(nodeId: String): Set<String> {
+            val instance = getInstance()
+            return if (instance.isClustered && instance.clusterManager is HazelcastClusterManager) {
+                instance.clusterManager!!.hazelcastInstance
+                    .getMap<String, Set<String>>("monster.enabledFeatures")[nodeId] ?: enabledFeatures
+            } else enabledFeatures
+        }
+
         fun getSessionHandler(): SessionHandler? {
             return getInstance().sessionHandler
+        }
+
+        fun getArchiveHandler(): ArchiveHandler? {
+            return getInstance().archiveHandler
+        }
+
+        fun getRetainedStore(): IMessageStore? {
+            return getInstance().retainedStore
         }
 
         fun getVertx(): Vertx? {
@@ -288,20 +336,48 @@ class Monster(args: Array<String>) {
             System.getenv("GATEWAY_CONFIG") ?: "config.yaml"
         }
 
-        // Archive config file (optional)
-        val archiveConfigIndex = Utils.getArgIndex(args, listOf("-archiveConfig", "--archiveConfig"))
-        archiveConfigFile = if (archiveConfigIndex != -1 && archiveConfigIndex + 1 < args.size) {
-            args[archiveConfigIndex + 1]
+        // Archive configs file (optional) - full sync: import from file, delete orphans
+        val archiveConfigsIndex = Utils.getArgIndex(args, listOf("-archiveConfigs", "--archiveConfigs"))
+        archiveConfigsFile = if (archiveConfigsIndex != -1 && archiveConfigsIndex + 1 < args.size) {
+            args[archiveConfigsIndex + 1]
         } else {
             null
         }
 
-        // Dashboard path for development (optional)
-        val dashboardPathIndex = Utils.getArgIndex(args, listOf("-dashboardPath", "--dashboardPath"))
-        dashboardPath = if (dashboardPathIndex != -1 && dashboardPathIndex + 1 < args.size) {
-            args[dashboardPathIndex + 1]
+        // Archive configs merge file (optional) - merge: import/update from file, keep existing
+        val archiveConfigsMergeIndex = Utils.getArgIndex(args, listOf("-archiveConfigsMerge", "--archiveConfigsMerge"))
+        archiveConfigsMergeFile = if (archiveConfigsMergeIndex != -1 && archiveConfigsMergeIndex + 1 < args.size) {
+            args[archiveConfigsMergeIndex + 1]
         } else {
             null
+        }
+
+        // Validate that both import modes aren't specified simultaneously
+        if (archiveConfigsFile != null && archiveConfigsMergeFile != null) {
+            println("ERROR: -archiveConfigs and -archiveConfigsMerge cannot be used together")
+            exitProcess(1)
+        }
+
+        // Device configs file (optional) - full sync: import from file, delete orphans
+        val deviceConfigsIndex = Utils.getArgIndex(args, listOf("-deviceConfigs", "--deviceConfigs"))
+        deviceConfigsFile = if (deviceConfigsIndex != -1 && deviceConfigsIndex + 1 < args.size) {
+            args[deviceConfigsIndex + 1]
+        } else {
+            null
+        }
+
+        // Device configs merge file (optional) - merge: import/update from file, keep existing
+        val deviceConfigsMergeIndex = Utils.getArgIndex(args, listOf("-deviceConfigsMerge", "--deviceConfigsMerge"))
+        deviceConfigsMergeFile = if (deviceConfigsMergeIndex != -1 && deviceConfigsMergeIndex + 1 < args.size) {
+            args[deviceConfigsMergeIndex + 1]
+        } else {
+            null
+        }
+
+        // Validate that both device import modes aren't specified simultaneously
+        if (deviceConfigsFile != null && deviceConfigsMergeFile != null) {
+            println("ERROR: -deviceConfigs and -deviceConfigsMerge cannot be used together")
+            exitProcess(1)
         }
 
         Utils.getArgIndex(args, listOf("-log", "--log")).let {
@@ -326,18 +402,91 @@ class Monster(args: Array<String>) {
         logger.fine("Cluster: ${isClustered()}")
 
         val builder = Vertx.builder()
+        val vertxOptions = VertxOptions()
+            .setMaxWorkerExecuteTime(5 * 60 * 1_000_000_000L) // 5 min — LLM calls with tool loops can be long
         // Apply worker pool size if specified via command line
         getWorkerPoolSize()?.let { poolSize ->
-            val vertxOptions = VertxOptions()
-                .setWorkerPoolSize(poolSize)
-            builder.with(vertxOptions)
+            vertxOptions.setWorkerPoolSize(poolSize)
             logger.fine("Vertx worker thread pool size set to $poolSize (via -workerPoolSize argument)")
         }
+        builder.with(vertxOptions)
 
         if (isClustered())
             clusterSetup(builder)
         else
             localSetup(builder)
+    }
+
+    private fun loadDeviceConfigs(vertx: Vertx, store: at.rocworks.stores.IDeviceConfigStore, file: String, fullSync: Boolean) {
+        val mode = if (fullSync) "full sync" else "merge"
+        logger.fine("Loading device configurations from: $file (mode: $mode)")
+
+        vertx.fileSystem().readFile(file).onComplete { readResult ->
+            if (readResult.failed()) {
+                logger.severe("Failed to read device config file $file: ${readResult.cause()?.message}")
+                return@onComplete
+            }
+
+            try {
+                val jsonArray = JsonArray(readResult.result().toString())
+                if (jsonArray.isEmpty) {
+                    logger.warning("No device configurations found in $file")
+                    return@onComplete
+                }
+
+                // Convert JsonArray to List<Map> and force enabled=false for safety
+                val configs = jsonArray.filterIsInstance<JsonObject>().map { obj ->
+                    val map = obj.map.toMutableMap()
+                    map["enabled"] = false
+                    map
+                }
+
+                val importedNames = configs.mapNotNull { it["name"] as? String }.toSet()
+
+                store.importConfigs(configs).onComplete { importResult ->
+                    if (importResult.succeeded()) {
+                        val result = importResult.result()
+                        logger.fine("Imported ${result.imported} device configs from $file (failed: ${result.failed})")
+                        if (result.errors.isNotEmpty()) {
+                            result.errors.forEach { logger.warning("Device import error: $it") }
+                        }
+
+                        if (fullSync) {
+                            deleteOrphanDeviceConfigs(store, importedNames)
+                        }
+                    } else {
+                        logger.severe("Failed to import device configs from $file: ${importResult.cause()?.message}")
+                    }
+                }
+            } catch (e: Exception) {
+                logger.severe("Failed to parse JSON from $file: ${e.message}")
+            }
+        }
+    }
+
+    private fun deleteOrphanDeviceConfigs(store: at.rocworks.stores.IDeviceConfigStore, importedNames: Set<String>) {
+        store.getAllDevices().onComplete { getAllResult ->
+            if (getAllResult.succeeded()) {
+                val orphanNames = getAllResult.result()
+                    .map { it.name }
+                    .filter { it !in importedNames }
+
+                if (orphanNames.isEmpty()) return@onComplete
+
+                orphanNames.forEach { name ->
+                    store.deleteDevice(name).onComplete { deleteResult ->
+                        if (deleteResult.succeeded() && deleteResult.result()) {
+                            logger.fine("Deleted orphan device config [$name] (full sync)")
+                        } else {
+                            logger.warning("Failed to delete orphan device config [$name]")
+                        }
+                    }
+                }
+                logger.fine("Full sync cleanup: deleting ${orphanNames.size} orphan device configs: $orphanNames")
+            } else {
+                logger.warning("Failed to get all devices for orphan cleanup: ${getAllResult.cause()?.message}")
+            }
+        }
     }
 
     private fun printHelp() {
@@ -351,9 +500,27 @@ OPTIONS:
   -config <file>        Configuration file path (default: config.yaml)
                         Environment: GATEWAY_CONFIG
 
-  -archiveConfig <file> Load ArchiveGroups from separate YAML file
-                        If ConfigStoreType is set: imports to database
-                        Otherwise: merges with main config in memory
+  -archiveConfigs <file> Load ArchiveGroups from a JSON file (full sync)
+                        Imports all groups from file, deletes groups not in file
+                        If ConfigStoreType is NONE: loads into memory
+
+  -archiveConfigsMerge <file>
+                        Load ArchiveGroups from a JSON file (merge)
+                        Imports/updates groups from file, keeps existing groups
+                        If ConfigStoreType is NONE: loads into memory
+                        Cannot be used together with -archiveConfigs
+
+  -deviceConfigs <file> Load device configurations from a JSON file (full sync)
+                        Imports all devices from file, deletes devices not in file
+                        Requires ConfigStoreType to be set (not NONE)
+                        Imported devices are disabled by default
+
+  -deviceConfigsMerge <file>
+                        Load device configurations from a JSON file (merge)
+                        Imports/updates devices from file, keeps existing devices
+                        Requires ConfigStoreType to be set (not NONE)
+                        Imported devices are disabled by default
+                        Cannot be used together with -deviceConfigs
 
   -cluster              Enable Hazelcast clustering mode for multi-node deployment
 
@@ -364,10 +531,6 @@ OPTIONS:
   -workerPoolSize <num> Vert.x worker thread pool size
                         Default: 2×CPU count (e.g., 16 on 8-core machine)
                         Increase for high-concurrency scenarios
-
-  -dashboardPath <path> Serve dashboard files from filesystem path (development only)
-                        Example: broker/src/main/resources/dashboard
-                        Default: serve from classpath resources
 
 EXAMPLES:
   # Start with default configuration
@@ -701,9 +864,10 @@ MORE INFO:
 
             // Retained messages
             val (retainedStore, retainedReady) = getMessageStore(vertx, "RetainedMessages", retainedStoreType)
+            this.retainedStore = retainedStore
 
             // Archive groups
-            val archiveHandler = ArchiveHandler(vertx, configJson, archiveConfigFile, isClustered)
+            val archiveHandler = ArchiveHandler(vertx, configJson, archiveConfigsFile, archiveConfigsMergeFile, isClustered)
             val archiveGroupsFuture = archiveHandler.initialize()
 
             // Wait for all stores to be ready
@@ -751,6 +915,13 @@ MORE INFO:
                             } else {
                                 // Start Topic Schema Policy Cache after store is ready
                                 at.rocworks.schema.TopicSchemaPolicyCache(vertx, store).start()
+
+                                // Load device configs from file if specified
+                                val deviceConfigFile = deviceConfigsFile ?: deviceConfigsMergeFile
+                                if (deviceConfigFile != null) {
+                                    val fullSync = deviceConfigsFile != null
+                                    loadDeviceConfigs(vertx, store, deviceConfigFile, fullSync)
+                                }
                             }
                         }
                         store
@@ -759,6 +930,9 @@ MORE INFO:
                         null
                     }
                 } else {
+                    if (deviceConfigsFile != null || deviceConfigsMergeFile != null) {
+                        logger.warning("-deviceConfigs/-deviceConfigsMerge requires ConfigStoreType to be set (not NONE)")
+                    }
                     null
                 }
 
@@ -839,13 +1013,19 @@ MORE INFO:
                 }
 
                 // GenAI Provider
-                val genAiConfig = configJson.getJsonObject("GenAI", JsonObject())
                 val genAiProvider = try {
-                    at.rocworks.genai.GenAiProviderFactory.create(vertx, genAiConfig).get()
+                    at.rocworks.genai.GenAiProviderFactory.create(vertx, configJson).get()
                 } catch (e: Exception) {
                     logger.warning("Failed to initialize GenAI provider: ${e.message}")
                     null
                 }
+
+                // Dashboard config
+                val dashboardConfig = configJson.getJsonObject("Dashboard", JsonObject())
+                val dashboardEnabled = dashboardConfig.getBoolean("Enabled", true)
+                val dashboardPath: String? = if (dashboardEnabled) {
+                    dashboardConfig.getString("Path", "")
+                } else null
 
                 // GraphQL Server
                 val graphQLConfig = configJson.getJsonObject("GraphQL", JsonObject())
@@ -865,29 +1045,15 @@ MORE INFO:
                         sessionHandler,
                         metricsStore,
                         this.archiveHandler,
-                        dashboardPath,
                         deviceConfigStore,
-                        genAiProvider
+                        genAiProvider,
+                        dashboardPath
                     )
                 } else {
                     logger.fine("GraphQL server is disabled in configuration")
                     null
                 }
 
-                // API Service (JSON-RPC 2.0 over MQTT)
-                val apiEnabled = graphQLConfig.getBoolean("MqttApi", true)
-                val apiService = if (apiEnabled && graphQLServer != null) {
-                    val graphQLPort = graphQLConfig.getInteger("Port", 4000)
-                    val graphQLPath = graphQLConfig.getString("Path", "/graphql")
-                    ApiService(sessionHandler, "graphql", graphQLPort, graphQLPath)
-                } else {
-                    if (!apiEnabled) {
-                        logger.fine("API Service is disabled in configuration")
-                    } else if (graphQLServer == null) {
-                        logger.fine("GraphQL server is disabled, API Service will not start")
-                    }
-                    null
-                }
 
                 // MQTT Servers
                 val servers = listOfNotNull(
@@ -954,37 +1120,86 @@ MORE INFO:
                     .compose { vertx.deployVerticle(userManager) }
                     .compose { vertx.deployVerticle(healthHandler) }
                     .compose {
-                        val opcUaDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(opcUaExtension, opcUaDeploymentOptions)
+                        // Resolve feature flags from top-level Features config block
+                        val featuresConfig = configJson.getJsonObject("Features", JsonObject())
+                        val allFeatures = listOf(
+                            "OpcUa", "OpcUaServer", "MqttClient", "Kafka", "Nats", "Telegram",
+                            "WinCCOa", "WinCCUa", "Plc4x", "Neo4j", "JdbcLogger",
+                            "SparkplugB", "FlowEngine", "Agents"
+                        )
+                        val enabled = allFeatures.filter { featuresConfig.getBoolean(it, true) }.toSet()
+                        publishEnabledFeatures(vertx, enabled)
+                        logger.info("Enabled features: $enabled")
+                        Future.succeededFuture<String>()
                     }
                     .compose {
-                        if (opcUaServerExtension != null) {
+                        if (Monster.isFeatureEnabled("OpcUa")) {
+                            val opcUaDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(opcUaExtension, opcUaDeploymentOptions)
+                        } else {
+                            logger.fine("OpcUa extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
+                    }
+                    .compose {
+                        if (opcUaServerExtension != null && Monster.isFeatureEnabled("OpcUaServer")) {
                             vertx.deployVerticle(opcUaServerExtension)
                         } else {
                             Future.succeededFuture<String>()
                         }
                     }
                     .compose {
-                        val mqttClientDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(mqttClientExtension, mqttClientDeploymentOptions)
+                        if (Monster.isFeatureEnabled("MqttClient")) {
+                            val mqttClientDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(mqttClientExtension, mqttClientDeploymentOptions)
+                        } else {
+                            logger.fine("MqttClient extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
                     }
                     .compose {
                         // Kafka Subscriber Extension
-                        val kafkaClientExtension = KafkaClientExtension()
-                        val kafkaDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(kafkaClientExtension, kafkaDeploymentOptions)
+                        if (Monster.isFeatureEnabled("Kafka")) {
+                            val kafkaClientExtension = KafkaClientExtension()
+                            val kafkaDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(kafkaClientExtension, kafkaDeploymentOptions)
+                        } else {
+                            logger.fine("Kafka extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
                     }
                     .compose {
                         // NATS Client Bridge Extension
-                        val natsClientExtension = at.rocworks.devices.natsclient.NatsClientExtension()
-                        val natsDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(natsClientExtension, natsDeploymentOptions)
+                        if (Monster.isFeatureEnabled("Nats")) {
+                            val natsClientExtension = at.rocworks.devices.natsclient.NatsClientExtension()
+                            val natsDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(natsClientExtension, natsDeploymentOptions)
+                        } else {
+                            logger.fine("Nats extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
+                    }
+                    .compose {
+                        // Telegram Client Bridge Extension
+                        if (Monster.isFeatureEnabled("Telegram")) {
+                            val telegramClientExtension = at.rocworks.devices.telegramclient.TelegramClientExtension()
+                            val telegramDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(telegramClientExtension, telegramDeploymentOptions)
+                        } else {
+                            logger.fine("Telegram extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
                     }
                     .compose {
                         // WinCC OA Client Extension (GraphQL-based)
-                        val winCCOaExtension = WinCCOaExtension()
-                        val winCCOaDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(winCCOaExtension, winCCOaDeploymentOptions)
+                        if (Monster.isFeatureEnabled("WinCCOa")) {
+                            val winCCOaExtension = WinCCOaExtension()
+                            val winCCOaDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(winCCOaExtension, winCCOaDeploymentOptions)
+                        } else {
+                            logger.fine("WinCCOa extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
                     }
                     .compose {
                         // OA Datapoint Bridge (native oa4j dpConnect for !OA/ topics)
@@ -1014,39 +1229,69 @@ MORE INFO:
                     }
                     .compose {
                         // WinCC Unified Client Extension
-                        val winCCUaExtension = WinCCUaExtension()
-                        val winCCUaDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(winCCUaExtension, winCCUaDeploymentOptions)
+                        if (Monster.isFeatureEnabled("WinCCUa")) {
+                            val winCCUaExtension = WinCCUaExtension()
+                            val winCCUaDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(winCCUaExtension, winCCUaDeploymentOptions)
+                        } else {
+                            logger.fine("WinCCUa extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
                     }
                     .compose {
                         // PLC4X Client Extension
-                        val plc4xExtension = Plc4xExtension()
-                        val plc4xDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(plc4xExtension, plc4xDeploymentOptions)
+                        if (Monster.isFeatureEnabled("Plc4x")) {
+                            val plc4xExtension = Plc4xExtension()
+                            val plc4xDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(plc4xExtension, plc4xDeploymentOptions)
+                        } else {
+                            logger.fine("Plc4x extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
                     }
                     .compose {
                         // Neo4j Client Extension
-                        val neo4jExtension = Neo4jExtension()
-                        val neo4jDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(neo4jExtension, neo4jDeploymentOptions)
+                        if (Monster.isFeatureEnabled("Neo4j")) {
+                            val neo4jExtension = Neo4jExtension()
+                            val neo4jDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(neo4jExtension, neo4jDeploymentOptions)
+                        } else {
+                            logger.fine("Neo4j extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
                     }
                     .compose {
                         // JDBC Logger Extension
-                        val jdbcLoggerExtension = at.rocworks.logger.JDBCLoggerExtension()
-                        val jdbcLoggerDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(jdbcLoggerExtension, jdbcLoggerDeploymentOptions)
+                        if (Monster.isFeatureEnabled("JdbcLogger")) {
+                            val jdbcLoggerExtension = at.rocworks.logger.JDBCLoggerExtension()
+                            val jdbcLoggerDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(jdbcLoggerExtension, jdbcLoggerDeploymentOptions)
+                        } else {
+                            logger.fine("JdbcLogger extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
                     }
                     .compose {
                         // SparkplugB Decoder Extension
-                        val sparkplugBDecoderExtension = SparkplugBDecoderExtension()
-                        val sparkplugBDecoderDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(sparkplugBDecoderExtension, sparkplugBDecoderDeploymentOptions)
+                        if (Monster.isFeatureEnabled("SparkplugB")) {
+                            val sparkplugBDecoderExtension = SparkplugBDecoderExtension()
+                            val sparkplugBDecoderDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(sparkplugBDecoderExtension, sparkplugBDecoderDeploymentOptions)
+                        } else {
+                            logger.fine("SparkplugB extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
                     }
                     .compose {
                         // Flow Engine Extension
-                        val flowEngineExtension = FlowEngineExtension()
-                        val flowEngineDeploymentOptions = DeploymentOptions().setConfig(configJson)
-                        vertx.deployVerticle(flowEngineExtension, flowEngineDeploymentOptions)
+                        if (Monster.isFeatureEnabled("FlowEngine")) {
+                            val flowEngineExtension = FlowEngineExtension()
+                            val flowEngineDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(flowEngineExtension, flowEngineDeploymentOptions)
+                        } else {
+                            logger.fine("FlowEngine extension disabled by Features config")
+                            Future.succeededFuture()
+                        }
                     }
                     .compose {
                         if (metricsCollector != null) {
@@ -1057,12 +1302,19 @@ MORE INFO:
                     }
                     .compose { Future.all<String>(servers.map { vertx.deployVerticle(it) }) }
                     .compose {
-                        // Deploy API Service after other components are ready
-                        if (apiService != null) {
-                            logger.fine("Deploying API Service...")
-                            vertx.deployVerticle(apiService)
+                        // Agent Extension (must start AFTER MCP server and other servers are ready)
+                        if (Monster.isFeatureEnabled("Agents")) {
+                            val agentExtension = at.rocworks.agents.AgentExtension()
+                            val agentDeploymentOptions = DeploymentOptions().setConfig(configJson)
+                            vertx.deployVerticle(agentExtension, agentDeploymentOptions)
+                                .recover { error ->
+                                    // Non-fatal: agents are optional
+                                    logger.warning("AgentExtension not started: ${error.message}")
+                                    Future.succeededFuture<String>()
+                                }
                         } else {
-                            Future.succeededFuture<String>()
+                            logger.fine("Agents extension disabled by Features config")
+                            Future.succeededFuture()
                         }
                     }
                     .compose {

@@ -80,7 +80,7 @@ class MetricsResolver(
                         }
                     }).onComplete { result ->
                         if (result.succeeded()) {
-                            future.complete(Broker(nodeId, Version.getVersion()))
+                            future.complete(Broker(nodeId, Version.getVersion(), Monster.getEnabledFeaturesForNode(nodeId).sorted()))
                         } else {
                             future.completeExceptionally(result.cause())
                         }
@@ -142,9 +142,7 @@ class MetricsResolver(
                             }
                         }).onComplete { result ->
                             if (result.succeeded()) {
-                                brokerFuture.complete(Broker(nodeId, Version.getVersion()))
-                            } else {
-                                brokerFuture.complete(null)
+                                brokerFuture.complete(Broker(nodeId, Version.getVersion(), Monster.getEnabledFeaturesForNode(nodeId).sorted()))
                             }
                         }
                     } else {
@@ -1604,7 +1602,6 @@ class MetricsResolver(
         val i3xPort: Int,
         val graphqlEnabled: Boolean,
         val graphqlPort: Int,
-        val mqttApiEnabled: Boolean,
         val metricsEnabled: Boolean,
         val genAiEnabled: Boolean,
         val genAiProvider: String,
@@ -1615,7 +1612,8 @@ class MetricsResolver(
         val crateDbUser: String,
         val mongoDbUrl: String,
         val mongoDbDatabase: String,
-        val sqlitePath: String
+        val sqlitePath: String,
+        val kafkaServers: String
     )
 
     fun brokerConfig(): DataFetcher<BrokerConfig> {
@@ -1645,18 +1643,22 @@ class MetricsResolver(
                 i3xPort = config.getJsonObject("I3x", io.vertx.core.json.JsonObject()).getInteger("Port", 3002),
                 graphqlEnabled = config.getJsonObject("GraphQL", io.vertx.core.json.JsonObject()).getBoolean("Enabled", true),
                 graphqlPort = config.getJsonObject("GraphQL", io.vertx.core.json.JsonObject()).getInteger("Port", 4000),
-                mqttApiEnabled = config.getJsonObject("GraphQL", io.vertx.core.json.JsonObject()).getBoolean("MqttApi", true),
                 metricsEnabled = config.getJsonObject("Metrics", io.vertx.core.json.JsonObject()).getBoolean("Enabled", true),
                 genAiEnabled = config.getJsonObject("GenAI", io.vertx.core.json.JsonObject()).getBoolean("Enabled", false),
-                genAiProvider = config.getJsonObject("GenAI", io.vertx.core.json.JsonObject()).getString("Provider", ""),
-                genAiModel = config.getJsonObject("GenAI", io.vertx.core.json.JsonObject()).getString("Model", ""),
+                genAiProvider = config.getJsonObject("GenAI", io.vertx.core.json.JsonObject()).let { genAi ->
+                    genAi.getJsonObject("Assistant", null)?.getString("Provider") ?: genAi.getString("Provider", "")
+                },
+                genAiModel = config.getJsonObject("GenAI", io.vertx.core.json.JsonObject()).let { genAi ->
+                    genAi.getJsonObject("Assistant", null)?.getString("Model") ?: genAi.getString("Model", "")
+                },
                 postgresUrl = config.getJsonObject("Postgres", io.vertx.core.json.JsonObject()).getString("Url", ""),
                 postgresUser = config.getJsonObject("Postgres", io.vertx.core.json.JsonObject()).getString("User", ""),
                 crateDbUrl = config.getJsonObject("CrateDB", io.vertx.core.json.JsonObject()).getString("Url", ""),
                 crateDbUser = config.getJsonObject("CrateDB", io.vertx.core.json.JsonObject()).getString("User", ""),
                 mongoDbUrl = sanitizeUrl(config.getJsonObject("MongoDB", io.vertx.core.json.JsonObject()).getString("Url", "")),
                 mongoDbDatabase = config.getJsonObject("MongoDB", io.vertx.core.json.JsonObject()).getString("Database", ""),
-                sqlitePath = config.getJsonObject("SQLite", io.vertx.core.json.JsonObject()).getString("Path", "")
+                sqlitePath = config.getJsonObject("SQLite", io.vertx.core.json.JsonObject()).getString("Path", ""),
+                kafkaServers = config.getJsonObject("Kafka", io.vertx.core.json.JsonObject()).getString("Servers", "")
             )
         }
     }

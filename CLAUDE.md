@@ -23,20 +23,15 @@ java -classpath target/classes:target/dependencies/* at.rocworks.MonsterKt [-clu
 ./run.sh [-cluster] [-log INFO|FINE|FINER|FINEST|ALL]
 ```
 
-#### Dashboard Development Mode
-When making changes to HTML/CSS/JavaScript dashboard files, you can run the broker with the `-dashboardPath` option to avoid rebuilding:
+#### iX Dashboard (dashboard/)
+The dashboard using Siemens iX lives in `dashboard/` and is built with Vite. It outputs to `dashboard/dist/`.
+
 ```bash
-cd broker
-./run.sh -dashboardPath src/main/resources/dashboard [-cluster] [-log INFO|FINE|FINER|FINEST|ALL]
+cd dashboard
+npm install
+npm run dev          # Vite dev server on http://localhost:5173, proxies /graphql to :4000
+npm run build        # Outputs to dashboard/dist/
 ```
-
-This allows you to:
-- Edit `.html` files in `src/main/resources/dashboard/pages/`
-- Edit `.css` files in `src/main/resources/dashboard/assets/`
-- Edit `.js` files in `src/main/resources/dashboard/js/`
-- Refresh the browser to see changes immediately without rebuilding the project
-
-This significantly speeds up dashboard development iterations.
 
 ### Running Tests
 
@@ -120,7 +115,7 @@ Devices follow a pattern of Extension (cluster-aware coordinator) + Connector (p
 - `devices/neo4j/` - Neo4j graph database bridge
 - `devices/sparkplugb/` - SparkplugB decoder
 
-For device integration guidance, see `plans/DEVICE_INTEGRATION.md`.
+For device integration guidance, see `dev/plans/DEVICE_INTEGRATION.md`.
 
 ### Key Directories
 
@@ -133,7 +128,7 @@ For device integration guidance, see `plans/DEVICE_INTEGRATION.md`.
   - `devices/` - Device configuration data classes
 - `broker/src/main/kotlin/devices/` - Device connector/extension implementations
 - `broker/src/main/kotlin/handlers/` - Message and subscription handlers
-- `broker/src/main/kotlin/extensions/` - Extensions (MCP Server, I3X API, Sparkplug, API Service)
+- `broker/src/main/kotlin/extensions/` - Extensions (MCP Server, I3X API, Sparkplug)
 - `broker/src/main/kotlin/graphql/` - GraphQL resolvers, queries, and mutations
 - `broker/src/main/kotlin/flowengine/` - Flow engine for automation workflows
 - `broker/src/main/kotlin/auth/` - Authentication and authorization
@@ -143,16 +138,23 @@ For device integration guidance, see `plans/DEVICE_INTEGRATION.md`.
 
 ### Web Dashboard
 
-The dashboard is a vanilla HTML/CSS/JS web interface (no frameworks):
+**iX Dashboard** (Siemens iX design system):
+- `dashboard/` - Vite project root
+  - `package.json` - Dependencies: `@siemens/ix`, `@siemens/ix-icons`, `@siemens/ix-echarts`, `echarts`, `vite`
+  - `vite.config.js` - Build config, outputs to `dashboard/dist/`
+  - `src/` - Dashboard source files
+    - `js/ix-init.js` - iX component registration + `classic-dark` theme (ES module)
+    - `js/sidebar.js` - `SidebarManager` using `ix-menu` + `ix-menu-category` + `ix-menu-item` (add new pages here)
+    - `js/storage.js` - localStorage wrapper
+    - `js/graphql-client.js` - `GraphQLDashboardClient` class
+    - `js/log-viewer.js` - Global log viewer component
+    - `assets/monster-theme.css` - Remaining custom styles (being progressively reduced)
+    - `assets/ix-app.css` - iX layout overrides
+    - `pages/` - HTML pages (one per view), use `<ix-application>` + `<ix-menu>` shell
+    - `js/` - Page-specific JavaScript
+  - `dist/` - Build output (gitignored)
 
-- `broker/src/main/resources/dashboard/` - Dashboard root
-  - `assets/monster-theme.css` - Global dark theme (CSS variables)
-  - `js/storage.js` - localStorage wrapper
-  - `js/graphql-client.js` - `GraphQLDashboardClient` class
-  - `js/sidebar.js` - `SidebarManager` with menu config (add new pages here)
-  - `js/log-viewer.js` - Global log viewer component
-  - `pages/` - HTML pages (one per view)
-  - `js/` - Page-specific JavaScript
+**IMPORTANT**: Always edit dashboard files in `dashboard/src/`, NOT in `broker/src/main/resources/dashboard/`. The Vite build (`npm run build` or `./run -build`) copies the built output to `broker/src/main/resources/dashboard/`, so any direct edits there will be overwritten.
 
 ### HTTP Services and Ports
 
@@ -184,7 +186,6 @@ Key configuration sections:
 
 1. **MCP Server** (`extensions/McpServer.kt`, `extensions/McpHandler.kt`): Model Context Protocol integration for AI models
 2. **I3X API** (`extensions/I3xServer.kt`): CESMII I3X standard API for manufacturing data
-3. **API Service** (`extensions/ApiService.kt`): Generic REST API service
 4. **Sparkplug Extension** (`extensions/SparkplugExtension.kt`): Expands SparkplugB messages
 
 ### Technology Stack
@@ -218,7 +219,7 @@ Key configuration sections:
 - Clustering is optional and controlled via `-cluster` command line argument
 - Logging level can be configured via command line or properties files in `src/main/resources/`
 - The MCP Server integration uses the official MCP SDK (io.modelcontextprotocol.sdk)
-- Device integrations follow the Extension + Connector pattern (see `plans/DEVICE_INTEGRATION.md`)
-- The dashboard uses vanilla JS with `GraphQLDashboardClient` — no build tools or frameworks
+- Device integrations follow the Extension + Connector pattern (see `dev/plans/DEVICE_INTEGRATION.md`)
+- The iX dashboard uses vanilla JS with `GraphQLDashboardClient` and Vite for bundling
 - GraphQL schema is split across `broker/src/main/resources/schema-*.graphqls` files
-- Planning documents are in `plans/` (MQTT5 implementation, device integration, GraalVM analysis)
+- Developer and AI coding documentation is in `dev/` — see `dev/INDEX.md` for a full index. Implementation plans are in `dev/plans/`
