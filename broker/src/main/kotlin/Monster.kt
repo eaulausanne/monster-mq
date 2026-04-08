@@ -455,6 +455,21 @@ class Monster(args: Array<String>) {
             vertxOptions.setWorkerPoolSize(poolSize)
             logger.fine("Vertx worker thread pool size set to $poolSize (via -workerPoolSize argument)")
         }
+        // Configure fixed event bus port for container orchestration (Docker Swarm, Kubernetes)
+        // Without this, Vert.x binds to a random ephemeral port and advertises the raw container IP.
+        // When a container restarts with a new IP, other nodes hold stale cached addresses and fail to reconnect.
+        val eventBusPort = System.getenv("VERTX_EVENTBUS_PORT")?.toIntOrNull() ?: 0
+        if (eventBusPort > 0) {
+            val eventBusHost = System.getenv("VERTX_EVENTBUS_HOST") ?: "0.0.0.0"
+            val publicAddress = System.getenv("PUBLIC_ADDRESS")
+            vertxOptions.eventBusOptions
+                .setHost(eventBusHost)
+                .setPort(eventBusPort)
+                .setClusterPublicHost(publicAddress ?: eventBusHost)
+                .setClusterPublicPort(eventBusPort)
+            logger.info("Event bus configured: host=$eventBusHost, port=$eventBusPort, publicHost=${publicAddress ?: eventBusHost}")
+        }
+
         builder.with(vertxOptions)
 
         if (isClustered())
