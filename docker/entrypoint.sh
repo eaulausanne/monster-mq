@@ -22,6 +22,9 @@ CLASSPATH=$(echo "$CLASSPATH" | sed 's/:$//')
 
 mkdir -p log
 
+# Preserve any JAVA_OPTS passed via environment (e.g., -Xmx, DNS TTL settings)
+USER_JAVA_OPTS="${JAVA_OPTS:-}"
+
 # Detect if Java is GraalVM
 JAVA_VERSION=$(java -version 2>&1)
 if echo "$JAVA_VERSION" | grep -q "GraalVM"; then
@@ -32,7 +35,7 @@ else
     JAVA_OPTS=""
 fi
 
-JAVA_OPTS="$JAVA_OPTS --enable-native-access=ALL-UNNAMED"
+JAVA_OPTS="$JAVA_OPTS --enable-native-access=ALL-UNNAMED $USER_JAVA_OPTS"
 
 
 # Run the Java command with the conditional argument
