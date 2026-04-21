@@ -1,0 +1,51 @@
+TCP: 1883
+WS: 1884
+
+QueuedMessagesEnabled: true
+
+DefaultStoreType: POSTGRES
+
+GraphQL:
+  Enabled: true
+  Port: 4000
+  Path: /graphql
+
+Dashboard:
+  Enabled: true
+
+BulkProcessing:
+  Enabled: true
+  TimeoutMS: 50
+  BulkSize: 1000
+  WorkerThreads: 4
+
+BulkMessaging:
+  Enabled: true
+  TimeoutMS: 100
+  BulkSize: 1000
+
+Metrics:
+  Enabled: true
+  RetentionHours: 1
+  CollectionInterval: 10
+
+Logging:
+  Mqtt:
+    Enabled: false
+  Memory:
+    Enabled: true
+    Entries: 2000
+
+Postgres:
+  Url: jdbc:postgresql://your-db-host:5432/monstermq
+  User: system
+  Pass: manager
+  Schema: public
+
+Prometheus:
+  Enabled: true
+  Port: 3001
+
+MCP:
+  Enabled: true
+  Port: 3003

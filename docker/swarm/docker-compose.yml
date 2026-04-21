@@ -1,0 +1,114 @@
+# Docker Swarm cluster deployment for MonsterMQ
+#
+# Deploys a 3-node MonsterMQ cluster on Docker Swarm with:
+#   - Overlay networking for Hazelcast cluster discovery
+#   - HAProxy for MQTT and GraphQL load balancing
+#   - Docker configs for Hazelcast and MonsterMQ configuration
+#   - Rolling updates with rollback support
+#
+# PREREQUISITES:
+#   1. Docker Swarm initialized with 3+ manager nodes
+#   2. External "proxy" overlay network (for ingress/reverse proxy)
+#   3. External PostgreSQL database accessible from the cluster
+#   4. Docker configs created:
+#      - monstermq_config:    MonsterMQ config.yaml (see monster.yml)
+#      - hazelcast: Hazelcast XML with TCP discovery using service hostnames
+#      - haproxy:   HAProxy config for MQTT + GraphQL load balancing
+#
+# Create configs:
+#   docker config create monstermq_config monster.yml
+#   docker config create hazelcast hazelcast.xml
+#   docker config create haproxy haproxy.cfg
+#
+# Deploy:
+#   docker stack deploy -c docker-compose.yml monstermq
+
+services:
+  monstermq:
+    image: rocworks/monstermq:latest
+    hostname: "{{.Node.Hostname}}-monstermq"
+    command:
+      - -cluster
+      - -log
+      - INFO
+    environment:
+      HAZELCAST_CONFIG: "/app/hazelcast.xml"
+      JAVA_OPTS: "-Xmx512m -Xms256m"
+      TZ: "....."
+    volumes:
+      - monstermq_data:/data
+      - monstermq_security:/app/security
+    networks:
+      - cluster
+    configs:
+      - source: monstermq_config
+        target: /app/config.yaml
+        mode: 0444
+      - source: hazelcast
+        target: /app/hazelcast.xml
+        mode: 0444
+    deploy:
+      mode: replicated
+      replicas: 3
+      placement:
+        constraints:
+          - node.role == manager
+        max_replicas_per_node: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 5s
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        failure_action: pause
+        monitor: 5s
+        order: stop-first
+      endpoint_mode: dnsrr
+    stop_grace_period: 10s
+
+  proxy:
+    image: haproxy:2.9
+    networks:
+      - cluster
+      - proxy
+    configs:
+      - source: haproxy
+        target: /usr/local/etc/haproxy/haproxy.cfg
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        order: stop-first
+
+volumes:
+  monstermq_data:
+    driver: local
+  monstermq_security:
+    driver: local
+
+networks:
+  cluster:
+    driver: overlay
+  proxy:
+    external: true
+
+configs:
+  monstermq_config:
+    external: true
+  hazelcast:
+    external: true
+  haproxy:
+    external: true
